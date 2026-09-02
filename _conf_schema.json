@@ -1,0 +1,40 @@
+{
+  "account": {
+    "description": "雀魂账号",
+    "type": "string",
+    "hint": "用于登录大会室管理后台的雀魂账号（需有赛事管理权限）。",
+    "default": ""
+  },
+  "password": {
+    "description": "雀魂密码",
+    "type": "string",
+    "hint": "对应账号的密码，明文存储，请确保部署环境安全。修改后下一条指令会用新账号重新登录。",
+    "default": ""
+  },
+  "admin_ids": {
+    "description": "管理员白名单",
+    "type": "list",
+    "hint": "可使用本插件管理指令的用户标识。aiocqhttp(OneBot/Go-CQ) 填 QQ 号；qq_official / qq_official_webhook 只能填 openid（拿不到 QQ 号）。空列表表示不单独限制，此时回到原有逻辑（群管理 / AstrBot 全局 admins_id）。",
+    "default": []
+  },
+  "admin_mode": {
+    "description": "管理模式",
+    "type": "string",
+    "hint": "any = 白名单、群管理、全局管理员任一满足即可；strict = 只认上面的白名单（空列表则任何人都不算管理员）。",
+    "default": "any",
+    "options": ["any", "strict"],
+    "option_labels": ["白名单+群管理/全局", "仅白名单"]
+  },
+  "broadcast_enabled": {
+    "description": "对局播报",
+    "type": "bool",
+    "hint": "开启后，绑定赛事的群将自动轮询并推送对局开始/结束消息（风格同 mjdhs）。关闭则停止轮询。",
+    "default": true
+  },
+  "poll_interval": {
+    "description": "播报轮询间隔(秒)",
+    "type": "int",
+    "hint": "检查进行中对局与已完赛牌谱的时间间隔，建议 5~30 秒，过小会增加请求频率。",
+    "default": 10
+  }
+}
