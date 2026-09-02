@@ -11,3 +11,7 @@ support_platforms:
 - qq_official_webhook
 - webchat
 astrbot_version: '>=4.24.2'
+tags:
+   - 雀魂   
+   - 游戏
+   - 麻将
