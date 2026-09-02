@@ -1,5 +1,5 @@
 name: astrbot_plugin_mjdhs
-desc: Astrebot雀魂赛事管理插件：绑定赛事、查询名单/大厅/待机/规则/公告/排名、添加/删除选手、开赛、暂停/恢复/终止对局。
+desc: Astrbot雀魂赛事管理插件：绑定赛事、查询名单/大厅/待机/规则/公告/排名、添加/删除选手、开赛、暂停/恢复/终止对局。
 short_desc: 雀魂赛事管理
 version: 1.5.0
 author: SR3MP
