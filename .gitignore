@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# 运行时数据
+db.json
+*.log
+
+# 敏感配置（含雀魂账号明文密码）
+mjsoul_config.json
