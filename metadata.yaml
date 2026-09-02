@@ -3,6 +3,7 @@ desc: Astrebot雀魂赛事管理插件：绑定赛事、查询名单/大厅/待�
 short_desc: 雀魂赛事管理
 version: 1.5.0
 author: SR3MP
+repo: https://github.com/SR3MP/astrbot_plugin_mjdhs
 display_name: 雀魂赛事管理
 support_platforms:
 - aiocqhttp
