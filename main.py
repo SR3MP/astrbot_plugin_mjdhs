@@ -98,7 +98,7 @@ def _pick_text(v, lang="zh"):
     return ""
 
 
-@register("astrbot_plugin_mjdhs", "SR3MP", "雀魂大会室管理", "1.5.0")
+@register("astrbot_plugin_mjdhs", "SR3MP", "雀魂大会室管理", "1.5.2")
 class MjdhsPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -633,8 +633,8 @@ class MjdhsPlugin(Star):
     def _do_start(self, client, uid: int, season: int, param: str) -> str:
         # 开赛语法:
         #   %开赛                                          → 自动用准备中玩家开赛
-        #   %开赛 144687,13286280                         → 指定玩家ID（不足4人补AI）
-        #   %开赛 高根やす子,福賀くるみ,...                 → 指定玩家昵称（不足4人补AI）
+        #   %开赛 1234567,13579248                         → 指定玩家ID（不足4人补AI）
+        #   %开赛 玩家1,玩家2,...                          → 指定玩家昵称（不足4人补AI）
         #   %开赛 玩家列表||标签                            → 设置对局标签(remark)
         #   %开赛 !玩家列表                                → 固定座位（不随机交换）
         #   %开赛 玩家1 500,玩家2 500,500,500              → 指定初始点数
