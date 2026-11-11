@@ -245,13 +245,13 @@ if __name__ == "__main__":
         client = MjsoulClient(sys.argv[1], sys.argv[2])
         try:
             token = client.login()
-            print(f"✅ 登录成功: token={token[:12]}...")
+            print(f"登录成功: token={token[:12]}...")
             contests = client.fetch_contest_list()
             print(f"  赛事数: {len(contests)}")
             for c in contests:
                 name = c.get("contest_name", [{}])[0].get("content", "?")
                 print(f"    - {c.get('contest_id')}: {name}")
         except ApiError as e:
-            print(f"❌ 错误: {e}")
+            print(f"错误: {e}")
     else:
         print("用法: python3 mjsoul_client.py <账号> <密码>")

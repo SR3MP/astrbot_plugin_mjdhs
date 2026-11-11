@@ -35,6 +35,7 @@
 | 对局 | `%暂停` | 暂停当前对局（可指定对局 UUID） | 管理员 |
 | 对局 | `%恢复` | 恢复对局（可指定对局 UUID） | 管理员 |
 | 对局 | `%终止` | 终止对局（可指定对局 UUID） | 管理员 |
+| 播报 | `%播报` | 开/关本群对局播报（每个群独立，不影响其它群） | 任意 |
 
 ## 管理员权限
 
@@ -59,7 +60,7 @@
 %配置 模式 any             # 切回默认宽松模式
 ```
 
-> ⚠️ **平台 ID 差异**：
+> **平台 ID 差异**：
 > - **OneBot v11（aiocqhttp / Go-CQ）**：`admin_ids` 填 **QQ 号**，且群主/群管理自动算管理员（`any` 模式下）。
 > - **QQ 官方 API（qq_official / qq_official_webhook）**：拿不到 QQ 号，只能填用户的 **OPENID**（可从 AstrBot 日志的消息 `sender_id` 获取）；没有群角色信息，所以**必须**靠白名单或 AstrBot 全局 `admins_id` 判断管理员。
 
@@ -74,9 +75,9 @@ QQ群 → AstrBot 插件 (main.py + mjsoul_client.py)
 ```
 
 **优点：**
-- ✅ 纯 Python，无需 Node.js / mjsoul / WebSocket
-- ✅ 直接调用雀魂官方 HTTP API，自动绕过被墙的旧网关（gateway-v2.maj-soul.net）
-- ✅ 认证简单：`Authorization: Majsoul <token>`，登录密码以 `HMAC-SHA256(password, "lailai")` 加密后发送
+- 纯 Python，无需 Node.js / mjsoul / WebSocket
+- 直接调用雀魂官方 HTTP API，自动绕过被墙的旧网关（gateway-v2.maj-soul.net）
+- 认证简单：`Authorization: Majsoul <token>`，登录密码以 `HMAC-SHA256(password, "lailai")` 加密后发送
 
 ## 安装
 

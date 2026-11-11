@@ -20,10 +20,12 @@
     %删除 id1,id2  删除选手
     %开赛 [...]    开赛（支持ID/昵称、标签、固定座位、指定点数）
     %暂停 [uuid] / %恢复 [uuid] / %终止 [uuid]  对局控制
+    %播报          开/关本群对局播报（每个群独立）
     %帮助          帮助
     %查看配置 / %配置 / %重置配置  管理雀魂账号
 
 对局播报（默认开启，绑定后自动推送，风格同 mjdhs）:
+    %播报          开/关本群对局播报（每个群独立，不影响其它群）
     对局开始: 名字1,名字2,电脑,电脑
     对局结束: /?paipu=游戏编号
              H:mm:ss - H:mm:ss
@@ -66,7 +68,7 @@ DEFAULT_CONFIG = {
 }
 
 ALL_CMDS = {"帮助", "绑定", "解绑", "规则", "名单", "公告", "大厅", "待机",
-            "排名", "查看配置", "配置", "重置配置", "添加", "删除", "开赛", "暂停", "恢复", "终止"}
+            "排名", "查看配置", "配置", "重置配置", "添加", "删除", "开赛", "暂停", "恢复", "终止", "播报"}
 
 
 def _pick_text(v, lang="zh"):
@@ -228,7 +230,7 @@ class MjdhsPlugin(Star):
         return None
 
     # ---------- 指令 ----------
-    @filter.command("helpmjdhs", alias={"mjdhs帮助", "雀魂帮助", "dhs帮助"})
+    @filter.command("helpmjdhs", alias={"mjdhs帮助", "雀魂帮助"})
     async def cmd_help(self, event: AstrMessageEvent):
         yield event.plain_result(self._get_help())
 
@@ -241,7 +243,8 @@ class MjdhsPlugin(Star):
 ● 系统类指令
 %帮助 / %查看配置 / %配置 账号 xxx 密码 xxx
 %配置 管理 123 456(可修改的人, 可用 清空 移除)
-%配置 模式 any/strict (strict=只认白名单)"""
+%配置 模式 any/strict (strict=只认白名单)
+%播报 (开/关本群对局播报)"""
 
     @filter.regex(r"^%")
     async def on_message(self, event: AstrMessageEvent):
@@ -250,12 +253,9 @@ class MjdhsPlugin(Star):
             return
         message = message_str.strip()
 
-        if message.startswith("%"):
-            body = message[1:].strip()
-        elif message[:3].lower() == "dhs":
-            body = message[3:].strip()
-        else:
+        if not message.startswith("%"):
             return
+        body = message[1:].strip()
 
         # 匹配指令（长指令优先）
         cmd = ""
@@ -296,28 +296,28 @@ class MjdhsPlugin(Star):
             self.account_cfg = dict(DEFAULT_CONFIG)
             self._client = None
             self._save_config()
-            yield event.plain_result("✅ 配置已重置")
+            yield event.plain_result("配置已重置")
             return
 
         # 绑定类（需要管理员权限）
         if cmd == "绑定":
             if not is_admin:
-                yield event.plain_result("❌ 绑定需要管理员权限")
+                yield event.plain_result("绑定需要管理员权限")
                 return
             yield event.plain_result(self._do_bind(gid, param, str(event.session)))
             return
         if cmd == "解绑":
             if not is_admin:
-                yield event.plain_result("❌ 解绑需要管理员权限")
+                yield event.plain_result("解绑需要管理员权限")
                 return
             self.db.pop(gid, None)
             self._save_db()
-            yield event.plain_result("✅ 已解绑")
+            yield event.plain_result("已解绑")
             return
 
         # 写操作（添加/删除选手、开赛、对局控制）需管理员权限
         if cmd in {"添加", "删除", "开赛", "暂停", "恢复", "终止"} and not is_admin:
-            yield event.plain_result("❌ 该指令需要管理员权限")
+            yield event.plain_result("该指令需要管理员权限")
             return
 
         # 需要绑定的查询类
@@ -330,6 +330,12 @@ class MjdhsPlugin(Star):
         if isinstance(ent, dict) and not ent.get("session"):
             ent["session"] = str(event.session)
             self._save_db()
+
+        # 对局播报开关（本群独立）
+        if cmd == "播报":
+            yield event.plain_result(self._do_bcast_toggle(gid, ent))
+            return
+
         yield event.plain_result(self._do_query(cmd, cid, param))
 
     def _is_admin(self, event) -> bool:
@@ -369,19 +375,34 @@ class MjdhsPlugin(Star):
                     self._uid_cache[cid] = c.get("unique_id")
                     self._ensure_bcast()
                     name = _pick_text(c.get("contest_name")) or "?"
-                    return f"\u2705 绑定成功: {cid} {name}\n已开启对局播报（风格同 mjdhs）"
-            return f"❌ 未找到赛事 {cid}（请确认该账号有管理权限）"
+                    return f"绑定成功: {cid} {name}\n已开启对局播报（风格同 mjdhs）"
+            return f"未找到赛事 {cid}（请确认该账号有管理权限）"
         except ApiError as e:
-            return f"❌ 绑定失败: {e}"
+            return f"绑定失败: {e}"
         except Exception as e:
-            return f"❌ 绑定异常: {e}"
+            return f"绑定异常: {e}"
+
+    def _do_bcast_toggle(self, gid: str, ent) -> str:
+        """%播报：开/关本群对局播报（每个群独立，不影响其它群）。"""
+        if isinstance(ent, dict):
+            cur = ent.get("broadcast", True)
+            ent["broadcast"] = not cur
+            self._save_db()
+            if ent["broadcast"]:
+                self._ensure_bcast()  # 确保轮询线程在跑（全局开关开启时）
+                return "播报已开启"
+            return "播报已关闭"
+        # 老格式 db[gid]=int(cid)：默认开启，关闭时升级为带开关的字典
+        self.db[gid] = {"cid": self._entry_cid(ent), "session": "", "broadcast": False}
+        self._save_db()
+        return "播报已关闭"
 
     def _do_query(self, cmd: str, cid: int, param: str = "") -> str:
         try:
             client = self._get_client()
             uid = self._resolve_unique_id(cid)
             if not uid:
-                return f"❌ 无法解析赛事 {cid} 的 unique_id"
+                return f"无法解析赛事 {cid} 的 unique_id"
             season = self._get_active_season(uid)
 
             if cmd == "名单":
@@ -446,9 +467,9 @@ class MjdhsPlugin(Star):
                 return self._do_game_control(client, uid, cmd, param)
             return "暂未支持该指令"
         except ApiError as e:
-            return f"❌ 查询失败: {e}"
+            return f"查询失败: {e}"
         except Exception as e:
-            return f"❌ 异常: {e}"
+            return f"异常: {e}"
 
     def _get_active_season(self, uid) -> int:
         try:
@@ -493,10 +514,9 @@ class MjdhsPlugin(Star):
         cid = int(cid)
         uid = self._resolve_unique_id(cid)
         if not uid:
-            return f"❌ 无法解析赛事 {cid} 的 unique_id"
+            return f"无法解析赛事 {cid} 的 unique_id"
         detail = client.fetch_contest_detail(uid)
-        name = detail.get("contest_name") or []
-        nm = name[0].get("content", "?") if name else "?"
+        nm = _pick_text(detail.get("contest_name")) or "?"
         gm = detail.get("game_mode") or {}
         r = gm.get("detail_rule") or {}
 
@@ -504,7 +524,7 @@ class MjdhsPlugin(Star):
             v = r.get(k, d)
             return str(v) if v not in (None, "") else str(d)
 
-        L = [f"📋 {cid} {nm} — 规则说明"]
+        L = [f"{cid} {nm} — 规则说明"]
 
         # 基础参数
         L.append("")
@@ -552,9 +572,9 @@ class MjdhsPlugin(Star):
         L.append("")
         L.append("【特殊牌型】")
         if on:
-            L.append("✅ 允许：" + "、".join(cn(k) for k in on))
+            L.append("允许：" + "、".join(cn(k) for k in on))
         if off:
-            L.append("⛔ 禁止：" + "、".join(cn(k) for k in off))
+            L.append("禁止：" + "、".join(cn(k) for k in off))
 
         # 规则开关
         # 只保留立直麻将的正常规则开关。
@@ -577,8 +597,7 @@ class MjdhsPlugin(Star):
         L.append("【规则开关】")
         for k, label, ya, yb in SW:
             if k in r:
-                mark = "✅" if r.get(k) else "❌"
-                L.append(f"・{label}：{mark} {ya if r.get(k) else yb}")
+                L.append(f"・{label}：{ya if r.get(k) else yb}")
 
         # 禁用功能（disable_* 系列：开启即禁用该功能）
         DIS = [
@@ -709,7 +728,7 @@ class MjdhsPlugin(Star):
                             found_id = search_results[0].get("account_id")
                             found_name = search_results[0].get("nickname", nm)
                         if not found_id:
-                            return f"❌ 未找到玩家: {nm}"
+                            return f"未找到玩家: {nm}"
                         account_list.append(found_id)
                         names.append(found_name)
 
@@ -736,9 +755,9 @@ class MjdhsPlugin(Star):
                 pass
 
             if len(account_list) > target:
-                return f"❌ 玩家数量({len(account_list)})超过{target}人上限，请检查名单"
+                return f"玩家数量({len(account_list)})超过{target}人上限，请检查名单"
             if len(set(account_list)) != len(account_list):
-                return "❌ 玩家列表中存在重复，请检查名单"
+                return "玩家列表中存在重复，请检查名单"
 
             ai_level = 0  # 0=摸切电脑（与 mjdhs 一致）; 服务器会把占位 0 填充为摸切AI
             msg_suffix = ""
@@ -753,7 +772,7 @@ class MjdhsPlugin(Star):
 
             # AI 位点数=规则初点，校验总点数守恒（官方前端同样强制）
             if sum(init_points) != default_point * target:
-                return (f"⚠️ 初始点数总和({sum(init_points)})与规则不符，"
+                return (f"初始点数总和({sum(init_points)})与规则不符，"
                         f"应等于 {default_point}×{target}，请重新指定")
 
             client.create_game_plan(
@@ -765,14 +784,14 @@ class MjdhsPlugin(Star):
             )
             extra = f" | 标签: {remark}" if remark else ""
             extra += " | 固定座位" if not shuffle_seats else ""
-            return "✅ 开赛成功! 玩家: " + ",".join(names) + msg_suffix + extra
+            return "开赛成功! 玩家: " + ",".join(names) + msg_suffix + extra
         except ApiError as e:
             msg = str(e)
             if "ERR_CONTEST_PLAYER_IN_PLAN" in msg or "2543" in msg:
-                return "⚠️ 开赛失败: 所选玩家已在待开始的对局计划中\n可先等待对局开始，或检查对局计划列表"
-            return "❌ 开赛失败: " + msg
+                return "开赛失败: 所选玩家已在待开始的对局计划中\n可先等待对局开始，或检查对局计划列表"
+            return "开赛失败: " + msg
         except Exception as e:
-            return "❌ 开赛失败: " + str(e)
+            return "开赛失败: " + str(e)
 
     def _do_game_control(self, client, uid: int, cmd: str, param: str) -> str:
         # 暂停/恢复/终止对局: %暂停 [game_uuid] 或自动取当前对局
@@ -794,16 +813,16 @@ class MjdhsPlugin(Star):
 
             if cmd == "暂停":
                 client.pause_contest_running_game(uid, game_uuid)
-                return prefix + "✅ 已暂停对局 " + game_uuid[:20]
+                return prefix + "已暂停对局 " + game_uuid[:20]
             elif cmd == "恢复":
                 client.resume_contest_running_game(uid, game_uuid)
-                return prefix + "✅ 已恢复对局 " + game_uuid[:20]
+                return prefix + "已恢复对局 " + game_uuid[:20]
             elif cmd == "终止":
                 client.terminate_contest_running_game(uid, game_uuid)
-                return prefix + "✅ 已终止对局 " + game_uuid[:20]
+                return prefix + "已终止对局 " + game_uuid[:20]
             return "未知操作"
         except Exception as e:
-            return "❌ " + cmd + "失败: " + str(e)
+            return cmd + "失败: " + str(e)
 
     # ---------- 对局开始/结束播报（风格同 mjdhs） ----------
     def _load_bcast(self):
@@ -872,6 +891,8 @@ class MjdhsPlugin(Star):
             session_str = (ent or {}).get("session") if isinstance(ent, dict) else None
             if not session_str:
                 continue  # 老绑定记录还没补录 session，等群里下一条消息
+            if isinstance(ent, dict) and ent.get("broadcast", True) is False:
+                continue  # 本群已关闭播报（不影响其它群）
             try:
                 uid = self._resolve_uid(cid)
                 if not uid:
@@ -926,23 +947,36 @@ class MjdhsPlugin(Star):
 
     def _bcast_ends(self, session_str, running_uuids, ended_uuids, records, st):
         ended_set = set(st.get("ended") or [])
+        pending = st.get("pending_terminate") or {}
+
+        # 1) 正常结束：来自牌谱（对局结束: /?paipu=...）
         for r in records:
             ruuid = r.get("uuid")
             if not ruuid or ruuid in ended_set:
                 continue
             self._announce(session_str, self._format_end(r))
             ended_set.add(ruuid)
-        st["ended"] = list(ended_set)[-50:]
+            pending.pop(ruuid, None)  # 已正常结束，取消待定终止
 
-        # 进行中的对局消失且不在牌谱里 = 被终止（mjdhs 抓牌谱报 1203 → '对局被终止'）
+        # 2) 进行中的对局消失：留一个轮询周期确认是否真被终止
+        #    （牌谱同步有延迟，直接判终止会把"刚打完的正常对局"误报成"被终止"）
         still_running = set(running_uuids)
         for guuid in list(st.get("running") or []):
-            if guuid in still_running or guuid in ended_set or guuid in ended_uuids:
-                continue
-            self._announce(session_str, f"对局结束: /?paipu={guuid}\n对局被终止")
-            ended_set.add(guuid)
-            st["ended"] = list(ended_set)[-50:]
+            if guuid in still_running:
+                continue  # 仍在进行
+            if guuid in ended_set or guuid in ended_uuids:
+                continue  # 已/将正常结束
+            if guuid in pending:
+                # 连续两轮都不在牌谱 → 确认是被终止
+                self._announce(session_str, f"对局结束: /?paipu={guuid}\n对局被终止")
+                ended_set.add(guuid)
+                pending.pop(guuid, None)
+            else:
+                # 第一轮消失：先挂起，等下一个轮询周期再判定
+                pending[guuid] = 1
 
+        st["ended"] = list(ended_set)[-50:]
+        st["pending_terminate"] = pending
         st["running"] = running_uuids
 
     def _format_end(self, rec) -> str:
@@ -1058,8 +1092,8 @@ class MjdhsPlugin(Star):
         self._client = None  # 重新登录
         self._save_config()
         if updates and updates[0][0] in ("account", "password"):
-            return "✅ 配置已更新，将使用新账号登录"
-        return "✅ 权限配置已更新（立即生效，无需重启）"
+            return "配置已更新，将使用新账号登录"
+        return "权限配置已更新（立即生效，无需重启）"
 
     async def terminate(self):
         self._bcast_stop.set()
