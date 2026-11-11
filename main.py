@@ -33,6 +33,7 @@
 """
 import asyncio
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -44,10 +45,60 @@ from astrbot.core.message.components import Plain
 
 from .mjsoul_client import ApiError, MjsoulClient
 
+PLUGIN_NAME = "astrbot_plugin_mjdhs"
+# 插件源码目录：仅用于读取/迁移旧版遗留数据，新版不再向这里写入任何持久化文件
 PLUGIN_DIR = Path(__file__).resolve().parent
-CONFIG_FILE = PLUGIN_DIR / "mjsoul_config.json"  # 雀魂账号配置
-DB_FILE = PLUGIN_DIR / "db.json"  # QQ群 ↔ 赛事绑定
-BCAST_FILE = PLUGIN_DIR / "bcast_state.json"  # 播报状态(进行中对局/已播报牌谱)，防重启重复播报
+
+
+def _plugin_data_dir() -> Path:
+    """插件数据目录 data/plugin_data/<plugin_name>/，由 AstrBot 统一管理、备份与迁移。"""
+    try:
+        from astrbot.api.star import StarTools
+        path = StarTools.get_data_dir(PLUGIN_NAME)
+        if path:
+            return Path(path)
+    except Exception as e:
+        logger.debug(f"[mjdhs] StarTools.get_data_dir 不可用，按默认规则推算: {e}")
+    root = os.environ.get("ASTRBOT_ROOT") or os.getcwd()
+    path = Path(root) / "data" / "plugin_data" / PLUGIN_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DATA_DIR = _plugin_data_dir()
+CONFIG_FILE = DATA_DIR / "mjsoul_config.json"  # 雀魂账号配置（回退文件；优先用插件配置页）
+DB_FILE = DATA_DIR / "db.json"  # QQ群 ↔ 赛事绑定
+BCAST_FILE = DATA_DIR / "bcast_state.json"  # 播报状态(进行中对局/已播报牌谱)，防重启重复播报
+
+# 旧版写在插件自身目录的遗留文件，仅用于一次性迁移
+LEGACY_FILES = (
+    (PLUGIN_DIR / "mjsoul_config.json", CONFIG_FILE),
+    (PLUGIN_DIR / "db.json", DB_FILE),
+    (PLUGIN_DIR / "bcast_state.json", BCAST_FILE),
+)
+
+
+def _write_json(path: Path, data) -> None:
+    """写入持久化 JSON（自动确保数据目录存在）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _migrate_legacy_files() -> None:
+    """把旧版写在插件目录的数据搬到 plugin_data；旧文件改名留档，不删除用户数据。"""
+    for legacy, new in LEGACY_FILES:
+        if not legacy.exists() or new.exists():
+            continue
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            new.write_bytes(legacy.read_bytes())
+            try:
+                legacy.replace(legacy.with_name(legacy.name + ".migrated"))
+            except Exception:
+                pass  # 改名失败不影响迁移结果，旧文件保留即可
+            logger.info(f"[mjdhs] 已迁移 {legacy.name} → {new}")
+        except Exception as e:
+            logger.warning(f"[mjdhs] 迁移 {legacy.name} 失败（旧文件保留）: {e}")
 
 # 默认配置仅为占位；真实凭据请在「插件配置页」填写，或通过 %配置 指令修改。
 # 配置优先从 AstrBot 插件配置页(_conf_schema.json)读取；首次升级时会自动从旧的
@@ -100,10 +151,11 @@ def _pick_text(v, lang="zh"):
     return ""
 
 
-@register("astrbot_plugin_mjdhs", "SR3MP", "雀魂大会室管理", "1.5.2")
+@register(PLUGIN_NAME, "SR3MP", "雀魂大会室管理", "1.5.4")
 class MjdhsPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
+        _migrate_legacy_files()  # 旧版插件目录数据 → data/plugin_data/<plugin_name>/
         self.config = config
         self._client = None
         self._lock = threading.Lock()
@@ -180,7 +232,7 @@ class MjdhsPlugin(Star):
                     return
                 except Exception as e:
                     logger.warning(f"[mjdhs] 保存插件配置失败，回退到 mjsoul_config.json: {e}")
-        CONFIG_FILE.write_text(json.dumps(self.account_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json(CONFIG_FILE, self.account_cfg)
 
     def _load_db(self):
         self.db = {}
@@ -196,7 +248,7 @@ class MjdhsPlugin(Star):
                 self._save_db()
 
     def _save_db(self):
-        DB_FILE.write_text(json.dumps(self.db, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_json(DB_FILE, self.db)
 
     @staticmethod
     def _entry_cid(ent) -> int:
@@ -209,13 +261,19 @@ class MjdhsPlugin(Star):
 
     # ---------- 雀魂客户端 ----------
     def _get_client(self):
-        """获取（必要时新建）已登录的雀魂客户端"""
-        if self._client is None:
-            self._client = MjsoulClient(self.account_cfg.get("account", ""),
-                                        self.account_cfg.get("password", ""))
-            self._client.login()
-            logger.info("[mjdhs] 雀魂登录成功")
-        return self._client
+        """获取（必要时新建）已登录的雀魂客户端（线程安全）。
+
+        指令处理走 asyncio.to_thread、播报走独立线程，两者可能同时首次取客户端；
+        用锁保证只创建/登录一次，避免重复登录与 token 竞争。
+        """
+        with self._lock:
+            if self._client is None:
+                client = MjsoulClient(self.account_cfg.get("account", ""),
+                                      self.account_cfg.get("password", ""))
+                client.login()
+                self._client = client
+                logger.info("[mjdhs] 雀魂登录成功")
+            return self._client
 
     def _resolve_unique_id(self, contest_id) -> int:
         """把 contest_id 转 unique_id（直接从赛事列表取）"""
@@ -294,7 +352,8 @@ class MjdhsPlugin(Star):
                 yield event.plain_result("需要管理员权限")
                 return
             self.account_cfg = dict(DEFAULT_CONFIG)
-            self._client = None
+            with self._lock:
+                self._client = None
             self._save_config()
             yield event.plain_result("配置已重置")
             return
@@ -304,7 +363,9 @@ class MjdhsPlugin(Star):
             if not is_admin:
                 yield event.plain_result("绑定需要管理员权限")
                 return
-            yield event.plain_result(self._do_bind(gid, param, str(event.session)))
+            # 绑定会拉取赛事列表（网络 I/O），放到线程池，避免阻塞 AstrBot 事件循环
+            result = await asyncio.to_thread(self._do_bind, gid, param, str(event.session))
+            yield event.plain_result(result)
             return
         if cmd == "解绑":
             if not is_admin:
@@ -336,7 +397,10 @@ class MjdhsPlugin(Star):
             yield event.plain_result(self._do_bcast_toggle(gid, ent))
             return
 
-        yield event.plain_result(self._do_query(cmd, cid, param))
+        # 所有雀魂 REST 请求都在线程池执行：urllib 是同步阻塞的（timeout=20），
+        # 若直接在 async 处理器里调用，单条命令最长会卡住整个 AstrBot 消息事件循环
+        result = await asyncio.to_thread(self._do_query, cmd, cid, param)
+        yield event.plain_result(result)
 
     def _is_admin(self, event) -> bool:
         mode = self.account_cfg.get("admin_mode", "any")
@@ -835,8 +899,7 @@ class MjdhsPlugin(Star):
 
     def _save_bcast(self):
         try:
-            BCAST_FILE.write_text(
-                json.dumps(self._bcast_state, ensure_ascii=False, indent=2), encoding="utf-8")
+            _write_json(BCAST_FILE, self._bcast_state)
         except Exception:
             pass
 
@@ -1089,7 +1152,8 @@ class MjdhsPlugin(Star):
                     self.account_cfg["admin_ids"] = cur
             else:
                 self.account_cfg[k] = v
-        self._client = None  # 重新登录
+        with self._lock:
+            self._client = None  # 重新登录
         self._save_config()
         if updates and updates[0][0] in ("account", "password"):
             return "配置已更新，将使用新账号登录"

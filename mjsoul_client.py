@@ -14,6 +14,7 @@ API 基础地址: https://contest-gate-202411.maj-soul.com
 import hashlib
 import hmac
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,34 +35,39 @@ class MjsoulClient:
         self.password = password
         self.token = token
         self.timeout = 20
+        # 客户端实例会被指令线程池与播报线程共享，用可重入锁串行化请求
+        self._req_lock = threading.RLock()
 
     # ---------- 基础请求 ----------
     def _request(self, method: str, path: str, body: dict = None,
                  _allow_relogin: bool = True) -> dict:
-        url = API_BASE + path
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-        }
-        if self.token:
-            headers["authorization"] = f"Majsoul {self.token}"
+        # 请求串行化：多线程共享同一 token 时，避免 401 自动重登期间并发改写
+        # self.token（RLock 可重入，允许方法内部递归重试与 login 再次调用 _request）。
+        with self._req_lock:
+            url = API_BASE + path
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+            }
+            if self.token:
+                headers["authorization"] = f"Majsoul {self.token}"
 
-        data = json.dumps(body).encode("utf-8") if body else None
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            body_text = e.read().decode("utf-8", errors="ignore")
-            if e.code == 401 and _allow_relogin and path != "/api/login":
-                # token 失效/过期: 自动重新登录后重试一次, 根治 401 刷屏
-                self.token = ""  # 登录请求不带失效 token
-                self.login()
-                return self._request(method, path, body, _allow_relogin=False)
-            raise ApiError(f"HTTP {e.code}: {body_text[:300]}", e.code)
-        except urllib.error.URLError as e:
-            raise ApiError(f"网络错误: {e.reason}", 0)
+            data = json.dumps(body).encode("utf-8") if body else None
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body_text = e.read().decode("utf-8", errors="ignore")
+                if e.code == 401 and _allow_relogin and path != "/api/login":
+                    # token 失效/过期: 自动重新登录后重试一次, 根治 401 刷屏
+                    self.token = ""  # 登录请求不带失效 token
+                    self.login()
+                    return self._request(method, path, body, _allow_relogin=False)
+                raise ApiError(f"HTTP {e.code}: {body_text[:300]}", e.code)
+            except urllib.error.URLError as e:
+                raise ApiError(f"网络错误: {e.reason}", 0)
 
     # ---------- 登录 ----------
     def login(self) -> str:

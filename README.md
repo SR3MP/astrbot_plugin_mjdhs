@@ -109,16 +109,22 @@ QQ群 → AstrBot 插件 (main.py + mjsoul_client.py)
   ```
   %配置 账号 你的账号 密码 你的密码
   ```
-  配置会保存到插件配置页（配置页不可用时回退写入 `mjsoul_config.json`），重启仍有效，下次直接自动登录。
+  配置会保存到插件配置页（配置页不可用时回退写入数据目录下的 `mjsoul_config.json`），重启仍有效，下次直接自动登录。
 
-- **方式 C**：直接在插件目录新建 `mjsoul_config.json`
+- **方式 C（仅旧版数据迁移用）**：在插件数据目录新建 `mjsoul_config.json`
+
+  路径：`data/plugin_data/astrbot_plugin_mjdhs/mjsoul_config.json`
   ```json
   {
     "account": "你的账号",
     "password": "你的密码"
   }
   ```
-  旧版沿用此文件；升级后首次加载会自动把其中的账号/密码/白名单迁移到插件配置页。
+  旧版曾把账号/密码/白名单写在插件源码目录；升级后首次加载会自动迁移到数据目录并同步到插件配置页，旧文件改名 `.migrated` 留档。新部署请优先用方式 A / B。
+
+- **数据存储**：`db.json`（群↔赛事绑定）、`bcast_state.json`（播报状态）统一保存在
+  `data/plugin_data/astrbot_plugin_mjdhs/`，由 AstrBot 统一管理，升级/迁移插件时不会丢数据。
+  旧版写在插件目录的这两个文件也会在首次加载时自动迁移。
 
 ### 3. 绑定赛事
 
@@ -171,6 +177,7 @@ QQ群 → AstrBot 插件 (main.py + mjsoul_client.py)
 ## 注意
 
 - 请遵守雀魂用户协议，勿滥用自动化功能
-- 账号密码以明文存储在 `mjsoul_config.json`（已加入 `.gitignore`，请勿提交到公开仓库）
+- 账号密码优先保存在 AstrBot 插件配置页；回退文件 `mjsoul_config.json` 位于 `data/plugin_data/astrbot_plugin_mjdhs/`（已加入 `.gitignore`，请勿提交到公开仓库）
+- 雀魂 REST 请求统一在线程池中执行，异步指令处理器不会阻塞 AstrBot 消息事件循环；对局播报轮询在独立线程运行
 - 代码中的默认配置（`DEFAULT_CONFIG`）为占位符，不含真实凭据；请按「安装 → 配置雀魂账号」的**方式 A**（AstrBot 插件设置）或 `%配置` 指令写入实际账号密码，配置后可用 `%查看配置` 确认
 - qq_official 平台看不到 QQ 号，白名单只能填 openid；如需按 QQ 号管理请使用 OneBot 接入
