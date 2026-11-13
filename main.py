@@ -71,6 +71,13 @@ CONFIG_FILE = DATA_DIR / "mjsoul_config.json"  # 雀魂账号配置（回退文�
 DB_FILE = DATA_DIR / "db.json"  # QQ群 ↔ 赛事绑定
 BCAST_FILE = DATA_DIR / "bcast_state.json"  # 播报状态(进行中对局/已播报牌谱)，防重启重复播报
 
+# 已播报牌谱的保留条数：必须远大于每轮拉取的牌谱窗口(limit=20)。
+# 旧实现把 ended 用 set 打乱后截到 50 条，历史一多就会把"最近 20 条"里的
+# uuid 随机挤出状态表，下一轮被当成新对局再次播报，形成无限重复。
+BCAST_ENDED_KEEP = 200
+# 播报状态结构版本。旧状态(乱序 ended)在升级后重建基线，立即止血。
+BCAST_STATE_VERSION = 2
+
 # 旧版写在插件自身目录的遗留文件，仅用于一次性迁移
 LEGACY_FILES = (
     (PLUGIN_DIR / "mjsoul_config.json", CONFIG_FILE),
@@ -153,7 +160,7 @@ def _pick_text(v, lang="zh"):
     return ""
 
 
-@register(PLUGIN_NAME, "SR3MP", "雀魂大会室管理", "1.5.4")
+@register(PLUGIN_NAME, "SR3MP", "雀魂大会室管理", "1.5.5")
 class MjdhsPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -170,6 +177,7 @@ class MjdhsPlugin(Star):
         self._bcast_state = {}      # str(cid) -> {running:[], ended:[], seeded:bool}
         self._bcast_stop = threading.Event()
         self._bcast_thread = None
+        self._bcast_lock = threading.Lock()  # 只保护轮询线程的创建，避免热重载/并发指令起多个线程
         self._main_loop = None
         try:
             self._main_loop = asyncio.get_event_loop()
@@ -1054,6 +1062,10 @@ class MjdhsPlugin(Star):
                 self._bcast_state = json.loads(BCAST_FILE.read_text(encoding="utf-8"))
             except Exception:
                 self._bcast_state = {}
+        # 状态文件损坏（如非 dict / 半写入）时退回空状态，下一轮自动重建基线，
+        # 不会因异常反复重播。
+        if not isinstance(self._bcast_state, dict):
+            self._bcast_state = {}
 
     def _save_bcast(self):
         try:
@@ -1062,15 +1074,20 @@ class MjdhsPlugin(Star):
             pass
 
     def _ensure_bcast(self):
-        """启动播报轮询线程（幂等）；对局播报关闭时不启动。"""
-        if not self.account_cfg.get("broadcast_enabled", True):
-            return
-        if self._bcast_thread and self._bcast_thread.is_alive():
-            return
-        self._bcast_stop.clear()
-        self._bcast_thread = threading.Thread(
-            target=self._bcast_loop, daemon=True, name="mjdhs-broadcast")
-        self._bcast_thread.start()
+        """启动播报轮询线程（幂等）；对局播报关闭时不启动。
+
+        指令线程与初始化都可能调用，必须用锁保证全局只有一个轮询线程；
+        两个线程各自持有状态副本会造成同一条播报被推送多次。
+        """
+        with self._bcast_lock:
+            if not self.account_cfg.get("broadcast_enabled", True):
+                return
+            if self._bcast_thread and self._bcast_thread.is_alive():
+                return
+            self._bcast_stop.clear()
+            self._bcast_thread = threading.Thread(
+                target=self._bcast_loop, daemon=True, name="mjdhs-broadcast")
+            self._bcast_thread.start()
 
     def _resolve_uid(self, cid) -> int:
         """contest_id -> unique_id（带缓存，避免每轮都拉全量赛事列表）"""
@@ -1129,21 +1146,31 @@ class MjdhsPlugin(Star):
 
             key = str(cid)
             st = self._bcast_state.setdefault(
-                key, {"running": [], "ended": [], "seeded": False})
+                key, {"running": [], "ended": [], "seeded": False,
+                      "v": BCAST_STATE_VERSION})
             running_uuids = [g.get("game_uuid") for g in running if g.get("game_uuid")]
             ended_uuids = [r.get("uuid") for r in records if r.get("uuid")]
 
-            if not st.get("seeded"):
-                # 首次轮询只记录基线，不补播已存在的对局（与 mjdhs 的推送行为一致）
+            # 首次轮询 / 旧版状态升级：只重建基线，不补播历史牌谱。
+            # 旧版 ended 是无序且被截断到 50 条的，会持续把近期牌谱判成新对局；
+            # 升级后直接重新基线，可在重启后立刻止住重复播报。
+            if not st.get("seeded") or st.get("v") != BCAST_STATE_VERSION:
                 st["running"] = running_uuids
-                st["ended"] = ended_uuids[-50:]
+                st["ended"] = ended_uuids[-BCAST_ENDED_KEEP:]
+                st["pending_terminate"] = {}
                 st["seeded"] = True
+                st["v"] = BCAST_STATE_VERSION
                 self._save_bcast()
+                logger.info(f"[mjdhs] 播报基线已重建（赛事 {cid}，{len(st['ended'])} 条历史牌谱不补播）")
                 continue
 
             self._bcast_starts(session_str, running, st)
-            self._bcast_ends(session_str, running_uuids, ended_uuids, records, st)
-            self._save_bcast()
+            try:
+                self._bcast_ends(session_str, running_uuids, ended_uuids, records, st)
+            finally:
+                # 即使结束判定抛错也推进基线，避免下一轮重复播报"对局开始"
+                st["running"] = running_uuids
+                self._save_bcast()
 
     @staticmethod
     def _names_of(players) -> list:
@@ -1167,36 +1194,51 @@ class MjdhsPlugin(Star):
             self._announce(session_str, msg)
 
     def _bcast_ends(self, session_str, running_uuids, ended_uuids, records, st):
-        ended_set = set(st.get("ended") or [])
+        # ended 必须始终保持"按播报先后排列"的有序列表。
+        # 旧写法 list(set(ended))[-50:] 会打乱顺序：历史超过 50 条后，每轮截断
+        # 保留的是随机 50 条，被挤出去的近期牌谱下一轮又变成"新对局"被重播，
+        # 且重播本身又改变集合大小，形成无限循环——这正是刷屏重复播报的根因。
+        ended = list(st.get("ended") or [])
+        ended_set = set(ended)
+        announced = set()  # 本轮已播报，防止接口返回重复记录时同局播两次
         pending = st.get("pending_terminate") or {}
 
         # 1) 正常结束：来自牌谱（对局结束: /?paipu=...）
         for r in records:
             ruuid = r.get("uuid")
-            if not ruuid or ruuid in ended_set:
+            if not ruuid or ruuid in ended_set or ruuid in announced:
                 continue
             self._announce(session_str, self._format_end(r))
+            announced.add(ruuid)
+            ended.append(ruuid)
             ended_set.add(ruuid)
             pending.pop(ruuid, None)  # 已正常结束，取消待定终止
 
         # 2) 进行中的对局消失：留一个轮询周期确认是否真被终止
         #    （牌谱同步有延迟，直接判终止会把"刚打完的正常对局"误报成"被终止"）
         still_running = set(running_uuids)
-        for guuid in list(st.get("running") or []):
-            if guuid in still_running:
-                continue  # 仍在进行
-            if guuid in ended_set or guuid in ended_uuids:
-                continue  # 已/将正常结束
-            if guuid in pending:
+        known_ended = ended_set | set(ended_uuids)
+        # 2a) 先结算上一轮挂起的对局。必须遍历 pending 本身：
+        #     st["running"] 在每轮末尾就被刷新成当前在跑的列表，下一轮已看不到
+        #     消失的 uuid，旧写法会让待定项永远等不到第二次判定（终止播报从不触发）。
+        for guuid in list(pending):
+            if guuid in known_ended or guuid in still_running:
+                pending.pop(guuid, None)  # 牌谱已同步(正常结束)或又回到对局中
+            else:
                 # 连续两轮都不在牌谱 → 确认是被终止
                 self._announce(session_str, f"对局结束: /?paipu={guuid}\n对局被终止")
+                ended.append(guuid)
                 ended_set.add(guuid)
                 pending.pop(guuid, None)
-            else:
-                # 第一轮消失：先挂起，等下一个轮询周期再判定
-                pending[guuid] = 1
+        # 2b) 本轮新消失、且牌谱里还没有的对局，挂起到下一轮再判
+        for guuid in list(st.get("running") or []):
+            if guuid in still_running or guuid in known_ended or guuid in pending:
+                continue
+            pending[guuid] = 1
 
-        st["ended"] = list(ended_set)[-50:]
+        # 尾部 = 最近播报的 N 条。N 远大于每轮拉取的 20 条窗口，
+        # 保证窗口内的 uuid 不会被挤出，也就不会被重新播报。
+        st["ended"] = ended[-BCAST_ENDED_KEEP:]
         st["pending_terminate"] = pending
         st["running"] = running_uuids
 
@@ -1319,6 +1361,13 @@ class MjdhsPlugin(Star):
 
     async def terminate(self):
         self._bcast_stop.set()
+        # 等旧轮询线程真正退出再卸载，否则热重载后新旧两个线程会同时播报同一条消息
+        t = self._bcast_thread
+        if t and t.is_alive() and t is not threading.current_thread():
+            try:
+                await asyncio.to_thread(t.join, 2)
+            except Exception:
+                pass
         try:
             self.context.unregister_all()
         except Exception:
