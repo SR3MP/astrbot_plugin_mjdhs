@@ -28,7 +28,7 @@
   "broadcast_enabled": {
     "description": "对局播报",
     "type": "bool",
-    "hint": "开启后，绑定赛事的群将自动轮询并推送对局开始/结束消息（风格同 mjdhs）。关闭则停止轮询。",
+    "hint": "开启后，绑定赛事的群将自动推送对局开始/结束消息。关闭则停止推送。",
     "default": true
   },
   "poll_interval": {

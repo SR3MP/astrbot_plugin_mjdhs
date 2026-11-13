@@ -13,19 +13,20 @@
     %规则          查看赛事信息
     %名单          查看参赛名单
     %公告          查看公告
-    %大厅          查看对局中/准备中
+    %大厅          查看对局中（选手/实时分数）与准备中
     %待机          查看准备中玩家
-    %排名          查看对局记录
+    %排名 [条数]   查看当前排名（昵称/总分/对局数）
+    %对局记录 [条数] / %记录  查看最近对局结果
     %添加 id1,id2  添加选手
     %删除 id1,id2  删除选手
     %开赛 [...]    开赛（支持ID/昵称、标签、固定座位、指定点数）
     %暂停 [uuid] / %恢复 [uuid] / %终止 [uuid]  对局控制
-    %播报          开/关本群对局播报（每个群独立）
+    %播报 [开/关]  开/关本群对局播报（每个群独立）
     %帮助          帮助
     %查看配置 / %配置 / %重置配置  管理雀魂账号
 
-对局播报（默认开启，绑定后自动推送，风格同 mjdhs）:
-    %播报          开/关本群对局播报（每个群独立，不影响其它群）
+对局播报（默认开启，绑定后自动推送）:
+    %播报 [开/关]  开/关本群对局播报（每个群独立，不影响其它群）
     对局开始: 名字1,名字2,电脑,电脑
     对局结束: /?paipu=游戏编号
              H:mm:ss - H:mm:ss
@@ -113,13 +114,14 @@ DEFAULT_CONFIG = {
     # "any"   = 有任一人即算管理员（群管理 或 AstrBot admins_id 或 上面白名单）
     # "strict" = 只认 admin_ids 白名单；空列表则任何人都不算管理员（可先用白名单再改回来）
     "admin_mode": "any",
-    # 对局播报开关与轮询间隔（绑定赛事的群自动推送对局开始/结束，风格同 mjdhs）
+    # 对局播报开关与轮询间隔（绑定赛事的群自动推送对局开始/结束）
     "broadcast_enabled": True,
     "poll_interval": 10,
 }
 
 ALL_CMDS = {"帮助", "绑定", "解绑", "规则", "名单", "公告", "大厅", "待机",
-            "排名", "查看配置", "配置", "重置配置", "添加", "删除", "开赛", "暂停", "恢复", "终止", "播报"}
+            "排名", "对局记录", "记录", "查看配置", "配置", "重置配置",
+            "添加", "删除", "开赛", "暂停", "恢复", "终止", "播报"}
 
 
 def _pick_text(v, lang="zh"):
@@ -163,7 +165,7 @@ class MjdhsPlugin(Star):
         self._config_is_astrbot = isinstance(config, dict)
         self._load_config()
         self._load_db()
-        # ---- 对局开始/结束播报（风格同 mjdhs） ----
+        # ---- 对局开始/结束播报（每群独立） ----
         self._uid_cache = {}        # contest_id -> unique_id 缓存，避免每次轮询都拉赛事列表
         self._bcast_state = {}      # str(cid) -> {running:[], ended:[], seeded:bool}
         self._bcast_stop = threading.Event()
@@ -297,12 +299,16 @@ class MjdhsPlugin(Star):
 ● 查询类指令(%为前缀)
 %绑定 赛事id / %解绑
 %规则 / %名单 / %公告
-%大厅 / %待机 / %排名
+%大厅 / %待机 / %排名 [条数]
+%对局记录 [条数] (或 %记录)
+● 比赛类指令(需管理员权限)
+%开赛 / %暂停 / %恢复 / %终止
+%添加 / %删除
 ● 系统类指令
 %帮助 / %查看配置 / %配置 账号 xxx 密码 xxx
 %配置 管理 123 456(可修改的人, 可用 清空 移除)
 %配置 模式 any/strict (strict=只认白名单)
-%播报 (开/关本群对局播报)"""
+%播报 开 / %播报 关 (不带参数为切换)"""
 
     @filter.regex(r"^%")
     async def on_message(self, event: AstrMessageEvent):
@@ -394,7 +400,7 @@ class MjdhsPlugin(Star):
 
         # 对局播报开关（本群独立）
         if cmd == "播报":
-            yield event.plain_result(self._do_bcast_toggle(gid, ent))
+            yield event.plain_result(self._do_bcast_toggle(gid, ent, param))
             return
 
         # 所有雀魂 REST 请求都在线程池执行：urllib 是同步阻塞的（timeout=20），
@@ -438,27 +444,35 @@ class MjdhsPlugin(Star):
                     self._save_db()
                     self._uid_cache[cid] = c.get("unique_id")
                     self._ensure_bcast()
-                    name = _pick_text(c.get("contest_name")) or "?"
-                    return f"绑定成功: {cid} {name}\n已开启对局播报（风格同 mjdhs）"
+                    return f"{cid}绑定成功。"
             return f"未找到赛事 {cid}（请确认该账号有管理权限）"
         except ApiError as e:
             return f"绑定失败: {e}"
         except Exception as e:
             return f"绑定异常: {e}"
 
-    def _do_bcast_toggle(self, gid: str, ent) -> str:
-        """%播报：开/关本群对局播报（每个群独立，不影响其它群）。"""
-        if isinstance(ent, dict):
-            cur = ent.get("broadcast", True)
-            ent["broadcast"] = not cur
-            self._save_db()
-            if ent["broadcast"]:
-                self._ensure_bcast()  # 确保轮询线程在跑（全局开关开启时）
-                return "播报已开启"
-            return "播报已关闭"
-        # 老格式 db[gid]=int(cid)：默认开启，关闭时升级为带开关的字典
-        self.db[gid] = {"cid": self._entry_cid(ent), "session": "", "broadcast": False}
+    def _do_bcast_toggle(self, gid: str, ent, param: str = "") -> str:
+        """%播报 [开/关]：显式设置或切换本群对局播报（每个群独立，不影响其它群）。"""
+        text = (param or "").strip().lower()
+        if text in ("开", "开启", "on", "enable", "1"):
+            want = True
+        elif text in ("关", "关闭", "off", "disable", "0"):
+            want = False
+        elif text:
+            return "用法: %播报 开 / %播报 关 / %播报 (不带参数为切换)"
+        else:
+            want = None  # 不带参数才切换
+
+        if not isinstance(ent, dict):
+            # 老格式 db[gid]=int(cid)：默认开启，统一升级为带开关的字典
+            ent = {"cid": self._entry_cid(ent), "session": ""}
+            self.db[gid] = ent
+        cur = ent.get("broadcast", True)
+        ent["broadcast"] = (not cur) if want is None else want
         self._save_db()
+        if ent["broadcast"]:
+            self._ensure_bcast()  # 确保轮询线程在跑（全局开关开启时）
+            return "播报已开启"
         return "播报已关闭"
 
     def _do_query(self, cmd: str, cid: int, param: str = "") -> str:
@@ -492,7 +506,13 @@ class MjdhsPlugin(Star):
                 ready = client.fetch_ready_player_list(uid, season)
                 running = client.fetch_running_game_list(uid, season)
                 res = f"[对局中({len(running)}局)]\n"
-                res += "(无)" if not running else "\n".join(str(g.get("game_uuid", "?")) for g in running)
+                if not running:
+                    res += "(无)"
+                else:
+                    res += "\n".join(
+                        self._format_running_game(g, rt)
+                        for g, rt in zip(running, self._fetch_realtime_batch(client, running))
+                    )
                 res += f"\n[准备中({len(ready)}人)]\n"
                 res += "(无)" if not ready else ",".join(p.get("nickname", "?") for p in ready)
                 return res
@@ -502,19 +522,9 @@ class MjdhsPlugin(Star):
                 res += "(无)" if not ready else ",".join(p.get("nickname", "?") for p in ready)
                 return res
             if cmd == "排名":
-                records = client.fetch_game_records(uid, season, limit=50)
-                res = f"[对局记录({len(records)}条)]\n"
-                if not records:
-                    res += "(无)"
-                else:
-                    for i, r in enumerate(records[:10], 1):
-                        accs = r.get("accounts", [])
-                        if accs:
-                            nicks = ",".join(a.get("nickname", "?") for a in accs)
-                        else:
-                            nicks = r.get("uuid", "?")[:16]
-                        res += f"{i}. {nicks}\n"
-                return res
+                return self._format_rank(client, uid, season, param)
+            if cmd in ("对局记录", "记录"):
+                return self._format_game_records(client, uid, season, param)
             if cmd == "规则":
                 return self._format_rules(cid)
             if cmd == "添加":
@@ -534,6 +544,154 @@ class MjdhsPlugin(Star):
             return f"查询失败: {e}"
         except Exception as e:
             return f"异常: {e}"
+
+    # ---------- 大厅/排名/对局记录 ----------
+    @staticmethod
+    def _parse_limit(param, default: int, cap: int) -> int:
+        """从指令参数里取条数，非法值回退默认值。"""
+        try:
+            n = int(str(param).strip())
+        except (TypeError, ValueError):
+            n = default
+        return max(1, min(n, cap))
+
+    @staticmethod
+    def _fetch_realtime_batch(client, games) -> list:
+        """并发拉取各局实时分数，避免多局时串行等待拖慢 %大厅。"""
+        fetch = getattr(client, "fetch_game_realtime", None)
+        if not callable(fetch) or not games:
+            return [{} for _ in games]
+
+        def one(g):
+            uuid = g.get("game_uuid") if isinstance(g, dict) else None
+            return fetch(uuid) if uuid else {}
+
+        from concurrent.futures import ThreadPoolExecutor
+        try:
+            with ThreadPoolExecutor(max_workers=min(8, len(games))) as pool:
+                return list(pool.map(one, games))
+        except Exception:
+            return [{} for _ in games]
+
+    def _format_running_game(self, game, rt) -> str:
+        """单局：选手+实时分数，附场次与对局编号（供暂停/终止使用）。"""
+        game = game if isinstance(game, dict) else {}
+        rt = rt if isinstance(rt, dict) else {}
+        players = game.get("players") or []
+        scores = rt.get("scores") or []
+        seats = []
+        for i, p in enumerate(players):
+            if not isinstance(p, dict):
+                continue
+            nick = (p.get("nickname") or "?") if p.get("account_id") else "电脑"
+            sc = scores[i] if i < len(scores) else None
+            seats.append(f"{nick} {sc if sc is not None else '--'}")
+        line1 = " / ".join(seats) if seats else "(无选手信息)"
+
+        stage = ""
+        try:
+            terms = ("东", "南", "西", "北")
+            ch, ju, ben = int(rt.get("chang", 0)), int(rt.get("ju", 0)) + 1, int(rt.get("ben", 0))
+            if 0 <= ch < len(terms):
+                stage = f"{terms[ch]}{ju}局 {ben}本"
+        except (TypeError, ValueError):
+            pass
+        line2 = " | ".join(x for x in (stage, game.get("game_uuid") or "?") if x)
+        return line1 + "\n  " + line2
+
+    def _format_rank(self, client, uid, season, param: str = "") -> str:
+        """%排名：当前排名（昵称 / 总分 / 对局数）。"""
+        limit = self._parse_limit(param, 20, 50)
+        rank_list, total = [], 0
+        try:
+            data = client.fetch_season_player_rank(uid, season, offset=0, limit=max(limit, 50))
+            if isinstance(data, dict):
+                rank_list = data.get("rank") or []
+                total = int(data.get("total") or len(rank_list) or 0)
+            elif isinstance(data, list):
+                rank_list, total = data, len(data)
+        except Exception:
+            rank_list = []
+        if rank_list:
+            return self._render_rank(rank_list[:limit], total)
+        # 旧赛事无赛季排名时，用牌谱累计出排名，保证 %排名 有正常结果
+        try:
+            records = client.fetch_game_records(uid, season, limit=100)
+        except Exception:
+            records = []
+        agg = self._aggregate_rank(records)
+        return self._render_rank(agg[:limit], len(agg))
+
+    @staticmethod
+    def _first_num(item, keys) -> int:
+        """兼容不同版本排名接口的字段名。"""
+        for k in keys:
+            v = item.get(k)
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                return int(v)
+            if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+                return int(v.strip())
+        return 0
+
+    def _render_rank(self, items, total: int = 0) -> str:
+        rows = []
+        for i, it in enumerate(items, 1):
+            if not isinstance(it, dict):
+                continue
+            name = it.get("nickname") or "?"
+            point = self._first_num(it, ("total_point", "accumulate_point", "score",
+                                         "display_score", "total_score"))
+            games = self._first_num(it, ("game_count", "total_game_count",
+                                         "total_count", "game_count_total"))
+            rows.append(f"{i}. {name} / {point} / {games}")
+        if not rows:
+            return "[排名(0人)]\n(无)"
+        return f"[排名({total or len(rows)}人)]\n姓名 / 总分 / 对局数\n" + "\n".join(rows)
+
+    @staticmethod
+    def _aggregate_rank(records) -> list:
+        """从牌谱的每位选手最终点数累计总分与对局数。"""
+        stat = {}
+        for rec in records or []:
+            rec = rec if isinstance(rec, dict) else {}
+            head = rec.get("head") if isinstance(rec.get("head"), dict) else {}
+            accounts = rec.get("accounts") or head.get("accounts") or []
+            result = rec.get("result") or head.get("result") or {}
+            players = result.get("players") if isinstance(result, dict) else None
+            if not players:
+                continue
+            name_by_seat = {
+                a.get("seat"): a.get("nickname") or "电脑"
+                for a in accounts if isinstance(a, dict) and a.get("seat") is not None
+            }
+            for p in players:
+                if not isinstance(p, dict):
+                    continue
+                nick = name_by_seat.get(p.get("seat")) or "电脑"
+                try:
+                    pt = int(p.get("part_point_1") or 0)
+                except (TypeError, ValueError):
+                    pt = 0
+                s = stat.setdefault(nick, {"nickname": nick, "total_point": 0, "game_count": 0})
+                s["total_point"] += pt
+                s["game_count"] += 1
+        return sorted(stat.values(), key=lambda x: x["total_point"], reverse=True)
+
+    def _format_game_records(self, client, uid, season, param: str = "") -> str:
+        """%对局记录：最近若干局结果，格式与对局结束播报一致。"""
+        limit = self._parse_limit(param, 5, 20)
+        records = client.fetch_game_records(uid, season, limit=max(limit, 10))
+        if not records:
+            return "[对局记录(0条)]\n(无)"
+        picked = records[:limit]
+        res = f"[对局记录(最近{len(picked)}条)]"
+        for rec in picked:
+            res += "\n" + self._format_end(rec)
+        if len(records) > len(picked):
+            res += f"\n(还有更多记录，可用 %对局记录 {min(len(records), 20)} 查看)"
+        return res
 
     def _get_active_season(self, uid) -> int:
         try:
@@ -888,7 +1046,7 @@ class MjdhsPlugin(Star):
         except Exception as e:
             return cmd + "失败: " + str(e)
 
-    # ---------- 对局开始/结束播报（风格同 mjdhs） ----------
+    # ---------- 对局开始/结束播报（每群独立） ----------
     def _load_bcast(self):
         self._bcast_state = {}
         if BCAST_FILE.exists():

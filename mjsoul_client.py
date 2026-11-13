@@ -20,6 +20,8 @@ import urllib.parse
 import urllib.request
 
 API_BASE = "https://contest-gate-202411.maj-soul.com"
+# 对局实时进度（公开接口，无需赛事后台 token）
+GAME_INFO_BASE = "https://common-202411.maj-soul.com"
 
 
 def hash_password(password: str) -> str:
@@ -156,6 +158,38 @@ class MjsoulClient:
         if isinstance(data, dict):
             return data.get("record_list", [])
         return data
+
+    def fetch_season_player_rank(self, unique_id, season_id=0, offset=0, limit=50) -> dict:
+        """赛季选手排名。返回 {"total": 人数, "rank": [...]}。"""
+        try:
+            uid = int(unique_id)
+        except (TypeError, ValueError):
+            uid = unique_id
+        resp = self._request("POST", "/api/contest/fetch_season_player_rank", {
+            "unique_id": uid,
+            "season_id": season_id,
+            "offset": offset,
+            "limit": limit,
+        })
+        return resp.get("data", {}) or {}
+
+    def fetch_game_realtime(self, game_uuid) -> dict:
+        """进行中对局的实时进度与各座分数（公开接口，无需登录）。
+
+        成功返回 {"uuid", "chang", "ju", "ben", "is_end", "scores": [...]}，
+        scores 按座位顺序排列；接口不可用/对局无进度时返回 {}。
+        """
+        url = (GAME_INFO_BASE + "/api/game/realtime/"
+              + urllib.parse.quote(str(game_uuid), safe="") + "/progress/latest")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                return json.loads(resp.read().decode("utf-8")) or {}
+        except Exception:
+            return {}
 
     def search_accounts(self, account_ids: list) -> list:
         """按雀魂ID搜索账号（添加选手前验证用）"""
