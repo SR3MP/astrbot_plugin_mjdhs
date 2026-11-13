@@ -160,7 +160,7 @@ def _pick_text(v, lang="zh"):
     return ""
 
 
-@register(PLUGIN_NAME, "SR3MP", "雀魂大会室管理", "1.5.5")
+@register(PLUGIN_NAME, "SR3MP", "雀魂大会室管理", "1.5.6")
 class MjdhsPlugin(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -1121,16 +1121,26 @@ class MjdhsPlugin(Star):
                 logger.warning(f"[mjdhs] 播报轮询异常: {e}")
 
     def _bcast_tick(self):
-        client = None
+        # 先按赛事聚合本轮要推送的会话：同一赛事只拉一次接口、只算一次状态，
+        # 再把同一条播报发给所有绑定该赛事且开启播报的群。
+        # 旧写法按 gid 遍历，状态却按 cid 共享，先处理的群把 uuid 记入 ended 后，
+        # 后面的群会被去重跳过，结果只有第一个群能收到播报。
+        targets = {}
         for gid, ent in list(self.db.items()):
+            if isinstance(ent, dict) and ent.get("broadcast", True) is False:
+                continue  # 本群已关闭播报（不影响其它群）
             cid = self._entry_cid(ent)
             if not cid:
                 continue
             session_str = (ent or {}).get("session") if isinstance(ent, dict) else None
             if not session_str:
                 continue  # 老绑定记录还没补录 session，等群里下一条消息
-            if isinstance(ent, dict) and ent.get("broadcast", True) is False:
-                continue  # 本群已关闭播报（不影响其它群）
+            bucket = targets.setdefault(cid, [])
+            if session_str not in bucket:
+                bucket.append(session_str)  # 同一个会话只推一次
+
+        client = None
+        for cid, sessions in targets.items():
             try:
                 uid = self._resolve_uid(cid)
                 if not uid:
@@ -1138,8 +1148,8 @@ class MjdhsPlugin(Star):
                 if client is None:
                     client = self._get_client()
                 season = self._get_active_season(uid)
-                running = client.fetch_running_game_list(uid, season)
-                records = client.fetch_game_records(uid, season, limit=20)
+                running = client.fetch_running_game_list(uid, season) or []
+                records = client.fetch_game_records(uid, season, limit=20) or []
             except Exception as e:
                 logger.warning(f"[mjdhs] 播报 {cid} 查询失败: {e}")
                 continue
@@ -1164,9 +1174,16 @@ class MjdhsPlugin(Star):
                 logger.info(f"[mjdhs] 播报基线已重建（赛事 {cid}，{len(st['ended'])} 条历史牌谱不补播）")
                 continue
 
-            self._bcast_starts(session_str, running, st)
+            # 一次状态计算，多会话分发；_announce 内部已吞掉发送异常，
+            # 某个群发送失败不会连累其它群。
+            def emit(_session, text, _sessions=tuple(sessions)):
+                for s in _sessions:
+                    self._announce(s, text)
+
+            first = sessions[0]
+            self._bcast_starts(first, running, st, emit)
             try:
-                self._bcast_ends(session_str, running_uuids, ended_uuids, records, st)
+                self._bcast_ends(first, running_uuids, ended_uuids, records, st, emit)
             finally:
                 # 即使结束判定抛错也推进基线，避免下一轮重复播报"对局开始"
                 st["running"] = running_uuids
@@ -1182,7 +1199,9 @@ class MjdhsPlugin(Star):
             out.append(p.get("nickname") or "电脑")
         return out
 
-    def _bcast_starts(self, session_str, running, st):
+    def _bcast_starts(self, session_str, running, st, emit=None):
+        """emit 由 _bcast_tick 注入，用于把同一条播报分发给多个群。"""
+        emit = emit or self._announce
         known = set(st.get("running") or [])
         for g in running:
             guuid = g.get("game_uuid")
@@ -1191,9 +1210,11 @@ class MjdhsPlugin(Star):
             names = self._names_of(g.get("players"))
             # mjdhs: '对局开始: ' + players.join(',')
             msg = "对局开始: " + (",".join(names) if names else str(guuid)[:16])
-            self._announce(session_str, msg)
+            emit(session_str, msg)
 
-    def _bcast_ends(self, session_str, running_uuids, ended_uuids, records, st):
+    def _bcast_ends(self, session_str, running_uuids, ended_uuids, records, st, emit=None):
+        """emit 由 _bcast_tick 注入，用于把同一条播报分发给多个群。"""
+        emit = emit or self._announce
         # ended 必须始终保持"按播报先后排列"的有序列表。
         # 旧写法 list(set(ended))[-50:] 会打乱顺序：历史超过 50 条后，每轮截断
         # 保留的是随机 50 条，被挤出去的近期牌谱下一轮又变成"新对局"被重播，
@@ -1208,7 +1229,7 @@ class MjdhsPlugin(Star):
             ruuid = r.get("uuid")
             if not ruuid or ruuid in ended_set or ruuid in announced:
                 continue
-            self._announce(session_str, self._format_end(r))
+            emit(session_str, self._format_end(r))
             announced.add(ruuid)
             ended.append(ruuid)
             ended_set.add(ruuid)
@@ -1226,7 +1247,7 @@ class MjdhsPlugin(Star):
                 pending.pop(guuid, None)  # 牌谱已同步(正常结束)或又回到对局中
             else:
                 # 连续两轮都不在牌谱 → 确认是被终止
-                self._announce(session_str, f"对局结束: /?paipu={guuid}\n对局被终止")
+                emit(session_str, f"对局结束: /?paipu={guuid}\n对局被终止")
                 ended.append(guuid)
                 ended_set.add(guuid)
                 pending.pop(guuid, None)
