@@ -609,7 +609,8 @@ class MjdhsPlugin(Star):
 
     def _format_rank(self, client, uid, season, param: str = "") -> str:
         """%排名：当前排名（昵称 / 总分 / 对局数），名次按官方榜单得点排序。"""
-        limit = self._parse_limit(param, 20, 50)
+        # 默认列出全部选手（最多 50 人），与原版 mjdhs 一致
+        limit = self._parse_limit(param, 50, 50)
         rank_list, total = [], 0
         try:
             # 官方榜单以得点 score 排序，接口返回顺序不一定等于展示顺序；
@@ -633,10 +634,19 @@ class MjdhsPlugin(Star):
         except Exception:
             rank_list = []
         if rank_list:
-            rank_list = sorted(
-                (it for it in rank_list if isinstance(it, dict)),
-                key=lambda it: (-self._rank_score(it), str(it.get("nickname") or "")),
-            )
+            rank_list = [it for it in rank_list if isinstance(it, dict)]
+            # 不同版本接口的对局数字段位置不一致，取不到时直接从牌谱统计真实局数
+            if any(self._rank_games(it) == 0 for it in rank_list):
+                games_map = self._games_from_records(client, uid, season)
+                for it in rank_list:
+                    if self._rank_games(it):
+                        continue
+                    n = (games_map.get(str(it.get("nickname") or ""))
+                         or games_map.get(str(it.get("account_id") or "")))
+                    if n:
+                        it["game_count"] = n
+            rank_list.sort(
+                key=lambda it: (-self._rank_score(it), str(it.get("nickname") or "")))
             return self._render_rank(rank_list[:limit], total or len(rank_list))
         # 旧赛事无赛季排名时，用牌谱累计出排名，保证 %排名 有正常结果
         try:
@@ -645,6 +655,34 @@ class MjdhsPlugin(Star):
             records = []
         agg = self._aggregate_rank(records)
         return self._render_rank(agg[:limit], len(agg))
+
+    @staticmethod
+    def _games_from_records(client, uid, season) -> dict:
+        """从牌谱统计每位选手的真实对局数（昵称、account_id 双键）。"""
+        games = {}
+        page = 100
+        try:
+            for offset in range(0, 1000, page):
+                records = client.fetch_game_records(uid, season, offset=offset, limit=page)
+                if not isinstance(records, list) or not records:
+                    break
+                for rec in records:
+                    if not isinstance(rec, dict):
+                        continue
+                    head = rec.get("head") if isinstance(rec.get("head"), dict) else {}
+                    accounts = rec.get("accounts") or head.get("accounts") or []
+                    for acc in accounts:
+                        if not isinstance(acc, dict):
+                            continue
+                        for key in (str(acc.get("nickname") or ""),
+                                    str(acc.get("account_id") or "")):
+                            if key and key != "0":
+                                games[key] = games.get(key, 0) + 1
+                if len(records) < page:
+                    break
+        except Exception:
+            pass
+        return games
 
     @staticmethod
     def _first_num(item, keys) -> int:
@@ -709,7 +747,10 @@ class MjdhsPlugin(Star):
             rows.append(f"{i}. {name} / {point_txt} / {games}")
         if not rows:
             return "[排名(0人)]\n(无)"
-        return f"[排名({total or len(rows)}人)]\n姓名 / 总分 / 对局数\n" + "\n".join(rows)
+        head = f"[排名({total or len(rows)}人)]"
+        if total and total > len(rows):
+            head = f"[排名(共{total}人, 前{len(rows)}名)]"
+        return head + "\n姓名 / 总分 / 对局数\n" + "\n".join(rows)
 
     @staticmethod
     def _aggregate_rank(records) -> list:
