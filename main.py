@@ -608,20 +608,36 @@ class MjdhsPlugin(Star):
         return line1 + "\n  " + line2
 
     def _format_rank(self, client, uid, season, param: str = "") -> str:
-        """%排名：当前排名（昵称 / 总分 / 对局数）。"""
+        """%排名：当前排名（昵称 / 总分 / 对局数），名次按官方榜单得点排序。"""
         limit = self._parse_limit(param, 20, 50)
         rank_list, total = [], 0
         try:
-            data = client.fetch_season_player_rank(uid, season, offset=0, limit=max(limit, 50))
-            if isinstance(data, dict):
-                rank_list = data.get("rank") or []
-                total = int(data.get("total") or len(rank_list) or 0)
-            elif isinstance(data, list):
-                rank_list, total = data, len(data)
+            # 官方榜单以得点 score 排序，接口返回顺序不一定等于展示顺序；
+            # 分页取全量后在本地重排，避免漏掉得分更高却排在后面的选手。
+            page = 100
+            for offset in range(0, 1000, page):
+                data = client.fetch_season_player_rank(
+                    uid, season, offset=offset, limit=page)
+                if isinstance(data, dict):
+                    batch = data.get("rank") or []
+                    total = int(data.get("total") or len(batch) or 0)
+                elif isinstance(data, list):
+                    batch, total = data, len(data)
+                else:
+                    batch = []
+                if not isinstance(batch, list):
+                    batch = []
+                rank_list.extend(batch)
+                if len(batch) < page or (total and len(rank_list) >= total):
+                    break
         except Exception:
             rank_list = []
         if rank_list:
-            return self._render_rank(rank_list[:limit], total)
+            rank_list = sorted(
+                (it for it in rank_list if isinstance(it, dict)),
+                key=lambda it: (-self._rank_score(it), str(it.get("nickname") or "")),
+            )
+            return self._render_rank(rank_list[:limit], total or len(rank_list))
         # 旧赛事无赛季排名时，用牌谱累计出排名，保证 %排名 有正常结果
         try:
             records = client.fetch_game_records(uid, season, limit=100)
@@ -643,17 +659,54 @@ class MjdhsPlugin(Star):
                 return int(v.strip())
         return 0
 
+    @classmethod
+    def _rank_score(cls, item) -> float:
+        """官方榜单的排名依据：得点 score（已含顺位得点、人工修正分）。
+
+        score 缺失时回退到累计打点 total_point/accumulate_point，兼容老版本接口
+        与牌谱聚合降级的条目。
+        """
+        for k in ("score", "display_score"):
+            v = item.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return float(v)
+            if isinstance(v, str):
+                try:
+                    return float(v.strip())
+                except ValueError:
+                    pass
+        return float(cls._first_num(item, ("total_point", "accumulate_point",
+                                            "total_score")))
+
+    @classmethod
+    def _rank_games(cls, item) -> int:
+        """对局数：官方接口把它放在 data.total_game_count（嵌套对象）。"""
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        for src in (data, item):
+            for k in ("total_game_count", "game_count", "total_count",
+                      "game_count_total", "match_count"):
+                n = cls._first_num(src, (k,))
+                if n:
+                    return n
+        # 计算排名接口：对局数 = 一到四位次数之和
+        pos = sum(cls._first_num(item, (k,)) for k in
+                  ("rank_1_count", "rank_2_count", "rank_3_count", "rank_4_count"))
+        if pos:
+            return pos
+        recent = data.get("recent_games")
+        return len(recent) if isinstance(recent, list) else 0
+
     def _render_rank(self, items, total: int = 0) -> str:
         rows = []
         for i, it in enumerate(items, 1):
             if not isinstance(it, dict):
                 continue
             name = it.get("nickname") or "?"
-            point = self._first_num(it, ("total_point", "accumulate_point", "score",
-                                         "display_score", "total_score"))
-            games = self._first_num(it, ("game_count", "total_game_count",
-                                         "total_count", "game_count_total"))
-            rows.append(f"{i}. {name} / {point} / {games}")
+            # 官网「总分」列 = 得点扣除人工修正分后的实际打点
+            point = self._rank_score(it) - self._first_num(it, ("modify_score",))
+            point_txt = f"{point:g}"
+            games = self._rank_games(it)
+            rows.append(f"{i}. {name} / {point_txt} / {games}")
         if not rows:
             return "[排名(0人)]\n(无)"
         return f"[排名({total or len(rows)}人)]\n姓名 / 总分 / 对局数\n" + "\n".join(rows)
