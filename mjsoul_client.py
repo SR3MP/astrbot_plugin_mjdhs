@@ -98,6 +98,13 @@ class MjsoulClient:
         resp = self._request("GET", f"/api/contest/fetch_contest_season_list?unique_id={unique_id}")
         return resp.get("data", [])
 
+    def fetch_contest_season_detail(self, unique_id, season_id=0) -> dict:
+        """赛季详情，含比赛场后台设定的排名规则 rank_rule。"""
+        resp = self._request(
+            "GET",
+            f"/api/contest/fetch_contest_season_detail?unique_id={unique_id}&season_id={season_id}")
+        return resp.get("data", {}) or {}
+
     def fetch_announcement(self, unique_id, language: str = "default") -> list:
         """获取赛事公告。
 

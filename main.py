@@ -15,7 +15,7 @@
     %公告          查看公告
     %大厅          查看对局中（选手/实时分数）与准备中
     %待机          查看准备中玩家
-    %排名 [条数]   查看当前排名（昵称/总分/对局数）
+    %排名 [条数]   按比赛场规则查看当前排名（昵称/总分/对局数）
     %对局记录 [条数] / %记录  查看最近对局结果
     %添加 id1,id2  添加选手
     %删除 id1,id2  删除选手
@@ -77,6 +77,14 @@ BCAST_FILE = DATA_DIR / "bcast_state.json"  # 播报状态(进行中对局/已�
 BCAST_ENDED_KEEP = 200
 # 播报状态结构版本。旧状态(乱序 ended)在升级后重建基线，立即止血。
 BCAST_STATE_VERSION = 2
+
+# 大会室后台的排名规则 rank_rule 枚举（来自官方前端）：
+# 12~15 / 206~210 = 最佳连续 N 战精算点，1/2/102~110 = 最近 N 战精算点，
+# 0/301 = 累计总分。排名分数由服务端按该规则算好，插件不自己推算公式。
+RANK_RULE_SERIES = {12: 2, 13: 3, 14: 4, 15: 5,
+                     206: 6, 207: 7, 208: 8, 209: 9, 210: 10}
+RANK_RULE_RECENT = {1: 3, 2: 5, 102: 2, 104: 4, 106: 6,
+                    107: 7, 108: 8, 109: 9, 110: 10}
 
 # 旧版写在插件自身目录的遗留文件，仅用于一次性迁移
 LEGACY_FILES = (
@@ -635,7 +643,15 @@ class MjdhsPlugin(Star):
             rank_list = []
         if rank_list:
             rank_list = [it for it in rank_list if isinstance(it, dict)]
-            # 不同版本接口的对局数字段位置不一致，取不到时直接从牌谱统计真实局数
+            rule_kind, rule_n, rule_name = self._get_rank_rule(client, uid, season)
+            # 分数以服务端按比赛场规则算好的得点 score 为准；接口没给 score 时，
+            # 按规则从官方成绩序列（最近 N 战 / 最佳连续 N 战）取点，不自行推算公式。
+            for it in rank_list:
+                if not self._has_score_field(it) and rule_kind and rule_n:
+                    s = self._score_by_rule(it, rule_kind, rule_n)
+                    if s is not None:
+                        it["score"] = s
+            # 不同版本接口的对局数字段位置不一致，取不到时从牌谱统计真实局数
             if any(self._rank_games(it) == 0 for it in rank_list):
                 games_map = self._games_from_records(client, uid, season)
                 for it in rank_list:
@@ -647,7 +663,8 @@ class MjdhsPlugin(Star):
                         it["game_count"] = n
             rank_list.sort(
                 key=lambda it: (-self._rank_score(it), str(it.get("nickname") or "")))
-            return self._render_rank(rank_list[:limit], total or len(rank_list))
+            return self._render_rank(rank_list[:limit], total or len(rank_list),
+                                      rule_name)
         # 旧赛事无赛季排名时，用牌谱累计出排名，保证 %排名 有正常结果
         try:
             records = client.fetch_game_records(uid, season, limit=100)
@@ -698,6 +715,78 @@ class MjdhsPlugin(Star):
         return 0
 
     @classmethod
+    def _get_rank_rule(cls, client, uid, season):
+        """读取比赛场后台设定的排名规则，返回 (类型, 局数, 规则名)。"""
+        raw = None
+        try:
+            detail = client.fetch_contest_season_detail(uid, season)
+            if isinstance(detail, dict):
+                raw = detail.get("rank_rule")
+                for key in ("season", "basic", "detail"):
+                    sub = detail.get(key)
+                    if raw is None and isinstance(sub, dict):
+                        raw = sub.get("rank_rule")
+        except Exception:
+            pass
+        if raw is None:
+            try:
+                for s in client.fetch_contest_season_list(uid) or []:
+                    if isinstance(s, dict) and str(s.get("season_id")) == str(season):
+                        raw = s.get("rank_rule")
+                        break
+            except Exception:
+                pass
+        return cls._parse_rank_rule(raw)
+
+    @staticmethod
+    def _parse_rank_rule(raw):
+        try:
+            r = int(raw)
+        except (TypeError, ValueError):
+            return ("", 0, "")
+        if r in RANK_RULE_SERIES:
+            n = RANK_RULE_SERIES[r]
+            return ("series", n, f"最佳连续{n}战精算点")
+        if r in RANK_RULE_RECENT:
+            n = RANK_RULE_RECENT[r]
+            return ("recent", n, f"最近{n}战精算点")
+        return ("total", 0, "累计总分")
+
+    @staticmethod
+    def _has_score_field(item) -> bool:
+        """服务端是否已给出按比赛场规则算好的得点。"""
+        for k in ("score", "display_score"):
+            v = item.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return True
+            if isinstance(v, str) and v.strip():
+                return True
+        return False
+
+    @classmethod
+    def _score_by_rule(cls, item, kind, n):
+        """接口没给 score 时，按规则从官方成绩序列取点。"""
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        games = None
+        if kind == "series":
+            hsp = (data.get("highest_series_points")
+                   or item.get("highest_series_points") or [])
+            if isinstance(hsp, list):
+                for e in hsp:
+                    if isinstance(e, dict) and cls._first_num(e, ("key",)) == n:
+                        games = e.get("results")
+                        break
+        elif kind == "recent":
+            rg = data.get("recent_games") or item.get("recent_games") or []
+            if isinstance(rg, list):
+                games = rg[:n]
+        if isinstance(games, list) and games:
+            vals = [cls._first_num(g, ("total_point", "score", "point"))
+                    for g in games if isinstance(g, dict)]
+            return float(sum(vals))
+        return None
+
+    @classmethod
     def _rank_score(cls, item) -> float:
         """官方榜单的排名依据：得点 score（已含顺位得点、人工修正分）。
 
@@ -734,7 +823,7 @@ class MjdhsPlugin(Star):
         recent = data.get("recent_games")
         return len(recent) if isinstance(recent, list) else 0
 
-    def _render_rank(self, items, total: int = 0) -> str:
+    def _render_rank(self, items, total: int = 0, rule_name: str = "") -> str:
         rows = []
         for i, it in enumerate(items, 1):
             if not isinstance(it, dict):
@@ -747,9 +836,11 @@ class MjdhsPlugin(Star):
             rows.append(f"{i}. {name} / {point_txt} / {games}")
         if not rows:
             return "[排名(0人)]\n(无)"
-        head = f"[排名({total or len(rows)}人)]"
+        label = f"{rule_name}, " if rule_name else ""
         if total and total > len(rows):
-            head = f"[排名(共{total}人, 前{len(rows)}名)]"
+            head = f"[排名({label}共{total}人, 前{len(rows)}名)]"
+        else:
+            head = f"[排名({label}{total or len(rows)}人)]"
         return head + "\n姓名 / 总分 / 对局数\n" + "\n".join(rows)
 
     @staticmethod
