@@ -326,12 +326,12 @@ class MjdhsPlugin(Star):
 %配置 模式 any/strict (strict=只认白名单)
 %播报 开 / %播报 关 (不带参数为切换)"""
 
-    @filter.regex(r"^%")
+    @filter.regex(r"^[%％]")
     async def on_message(self, event: AstrMessageEvent):
         message_str = getattr(event, "message_str", "") or ""
         if not message_str:
             return
-        message = message_str.strip()
+        message = message_str.strip().replace("％", "%")
 
         if not message.startswith("%"):
             return
@@ -1190,6 +1190,34 @@ class MjdhsPlugin(Star):
                 return (f"初始点数总和({sum(init_points)})与规则不符，"
                         f"应等于 {default_point}×{target}，请重新指定")
 
+            wanted = {int(a) for a in account_list if a}
+
+            # 关键：先查这些人是不是已经在对局里（跨赛季查，避免只查当前赛季漏判）
+            # 雀魂对"玩家已在局中"的开赛请求会返回成功但根本不开新局，必须拦在这里
+            def _all_running():
+                games = {}
+                for s in (0, season):
+                    try:
+                        for g in (client.fetch_running_game_list(uid, s) or []):
+                            if g.get("game_uuid"):
+                                games[g["game_uuid"]] = g
+                    except Exception:
+                        pass
+                return list(games.values())
+
+            before = _all_running()
+            before_uuids = {g.get("game_uuid") for g in before}
+            busy = {}
+            for g in before:
+                for p in (g.get("players") or []):
+                    pid = p.get("account_id")
+                    if pid in wanted and pid not in busy:
+                        busy[pid] = p.get("nickname") or str(pid)
+            if busy:
+                return ("开赛失败: 以下玩家已在进行中的对局里: "
+                        + ",".join(busy.values())
+                        + "\n请等这局结束后再开，或先用 %大厅 查看当前对局。")
+
             client.create_game_plan(
                 uid, season, account_list,
                 ai_level=ai_level,
@@ -1199,6 +1227,26 @@ class MjdhsPlugin(Star):
             )
             extra = f" | 标签: {remark}" if remark else ""
             extra += " | 固定座位" if not shuffle_seats else ""
+
+            # 接口返回成功不等于真的开局：必须确认出现了【新的】对局
+            # 用 game_uuid 排除开赛前就存在的旧局，否则"重复开赛"会被误判为成功
+            seen_new = False
+            if wanted:
+                for _ in range(10):
+                    for g in _all_running():
+                        if g.get("game_uuid") in before_uuids:
+                            continue
+                        ids = {p.get("account_id") for p in (g.get("players") or [])}
+                        if ids & wanted:
+                            seen_new = True
+                            break
+                    if seen_new:
+                        break
+                    time.sleep(2)
+                if not seen_new:
+                    return ("开赛请求已被接口接受，但暂未检测到新对局开始。\n"
+                            "可能所选玩家在待开始的计划中，或接口未真正创建，"
+                            "请用 %大厅 确认，不要重复开赛。")
             return "开赛成功! 玩家: " + ",".join(names) + msg_suffix + extra
         except ApiError as e:
             msg = str(e)

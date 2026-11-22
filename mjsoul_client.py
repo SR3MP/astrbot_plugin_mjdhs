@@ -274,7 +274,23 @@ class MjsoulClient:
             "remark": remark,
             "shuffle_seats": shuffle_seats,
         })
-        return resp.get("data", {})
+        data = resp.get("data", {})
+        # 接口可能以 HTTP 200 返回业务错误，必须显式检查，否则会误报开赛成功
+        if isinstance(data, dict):
+            err = data.get("error")
+            if err:
+                if isinstance(err, dict):
+                    code = err.get("code", "")
+                    msg = err.get("message") or err.get("name") or "业务错误"
+                else:
+                    code, msg = "", str(err)
+                raise ApiError(f"{msg} ({code})",
+                               int(code) if str(code).isdigit() else 0)
+            if data.get("success") is False:
+                raise ApiError(
+                    f"创建对局计划失败: {data.get('message') or json.dumps(data, ensure_ascii=False)[:200]}"
+                )
+        return data
 
 
 class ApiError(Exception):
